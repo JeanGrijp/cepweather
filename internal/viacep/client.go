@@ -44,14 +44,25 @@ func (c *Client) Lookup(ctx context.Context, cep string) (weather.Location, erro
 	var payload struct {
 		Localidade string `json:"localidade"`
 		UF         string `json:"uf"`
-		Erro       bool   `json:"erro"`
+		Erro       any    `json:"erro"` // ViaCEP pode retornar bool ou string "true"
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return weather.Location{}, err
 	}
 
-	if payload.Erro || payload.Localidade == "" {
+	// ViaCEP retorna "erro": "true" (string) ou "erro": true (bool) quando o CEP não existe
+	hasError := false
+	if payload.Erro != nil {
+		switch v := payload.Erro.(type) {
+		case bool:
+			hasError = v
+		case string:
+			hasError = v == "true"
+		}
+	}
+
+	if hasError || payload.Localidade == "" {
 		return weather.Location{}, weather.ErrNotFound
 	}
 

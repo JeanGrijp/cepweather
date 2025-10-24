@@ -15,24 +15,39 @@ A API está disponível publicamente no Google Cloud Run:
 GET /weather/{cep}
 ```
 
-**Exemplo de requisição:**
+**Exemplo de requisição com CEP válido:**
 ```bash
 curl https://cepweather-763272253855.us-central1.run.app/weather/54735220
 ```
 
-**Exemplo de resposta (200 OK):**
+**Resposta de sucesso (200 OK):**
 ```json
 {
-  "temp_C": 33.7,
-  "temp_F": 92.7,
-  "temp_K": 306.7
+  "temp_C": 28.5,
+  "temp_F": 83.3,
+  "temp_K": 301.5
 }
 ```
 
-**Possíveis respostas de erro:**
-- `422 Unprocessable Entity` - CEP inválido ou com formato incorreto
-- `404 Not Found` - CEP não encontrado na base de dados
-- `500 Internal Server Error` - Erro ao processar a requisição
+**Respostas de erro:**
+
+| Status | Mensagem | Descrição |
+|--------|----------|-----------|
+| `422` | `{"message":"invalid zipcode"}` | CEP com formato inválido (tamanho incorreto, caracteres especiais, etc.) |
+| `404` | `{"message":"can not find zipcode"}` | CEP não encontrado na base de dados do ViaCEP |
+| `500` | `{"message":"internal server error"}` | Erro inesperado no servidor ou nas APIs externas |
+
+**Exemplos de erros:**
+
+```bash
+# CEP não encontrado
+curl https://cepweather-763272253855.us-central1.run.app/weather/53424543
+# Resposta: 404 {"message":"can not find zipcode"}
+
+# CEP com formato inválido (muito longo)
+curl https://cepweather-763272253855.us-central1.run.app/weather/012345678
+# Resposta: 422 {"message":"invalid zipcode"}
+```
 
 #### 2. Health Check
 ```http
@@ -51,13 +66,16 @@ ok
 
 ### CEPs para Teste
 
-| CEP | Cidade | Estado |
-|-----|--------|--------|
-| `01001000` | São Paulo | SP |
-| `20040020` | Rio de Janeiro | RJ |
-| `30140071` | Belo Horizonte | MG |
-| `80010000` | Curitiba | PR |
-| `54735220` | São Lourenço da Mata | PE |
+| CEP | Cidade | Estado | Status Esperado |
+|-----|--------|--------|-----------------|
+| `01001000` | São Paulo | SP | ✅ 200 OK |
+| `20040020` | Rio de Janeiro | RJ | ✅ 200 OK |
+| `30140071` | Belo Horizonte | MG | ✅ 200 OK |
+| `80010000` | Curitiba | PR | ✅ 200 OK |
+| `54735220` | São Lourenço da Mata | PE | ✅ 200 OK |
+| `53424543` | CEP não encontrado | - | ❌ 404 Not Found |
+| `00000000` | CEP inválido | - | ❌ 404 Not Found |
+| `123` | Formato inválido | - | ❌ 422 Invalid |
 
 ## Requisitos
 
@@ -285,36 +303,101 @@ curl https://SEU_ENDPOINT/weather/01001000
 
 ## 📝 Testando com Postman
 
-### Importar Collection
+### Collection de Testes
 
 Você pode testar a API usando o Postman com as seguintes requisições:
 
-**1. Health Check**
-- Method: `GET`
-- URL: `https://cepweather-763272253855.us-central1.run.app/healthz`
-- Headers: Nenhum necessário
+#### 1. Health Check
+- **Method:** `GET`
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/healthz`
+- **Headers:** Nenhum necessário
+- **Resposta esperada:** `200 OK` com corpo `ok`
 
-**2. Buscar Temperatura por CEP**
-- Method: `GET`
-- URL: `https://cepweather-763272253855.us-central1.run.app/weather/54735220`
-- Headers: Nenhum necessário
-
-### Exemplos de Testes
-
-**Teste com CEP válido:**
-```
-GET https://cepweather-763272253855.us-central1.run.app/weather/01001000
-Resposta esperada: 200 OK
-```
-
-**Teste com CEP inválido:**
-```
-GET https://cepweather-763272253855.us-central1.run.app/weather/00000000
-Resposta esperada: 422 Unprocessable Entity
+#### 2. Consultar Temperatura - CEP Válido
+- **Method:** `GET`
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/54735220`
+- **Headers:** Nenhum necessário
+- **Resposta esperada:** `200 OK`
+```json
+{
+  "temp_C": 28.5,
+  "temp_F": 83.3,
+  "temp_K": 301.5
+}
 ```
 
-**Teste com CEP não encontrado:**
+#### 3. Consultar Temperatura - CEP Não Encontrado
+- **Method:** `GET`
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/53424543`
+- **Headers:** Nenhum necessário
+- **Resposta esperada:** `404 Not Found`
+```json
+{
+  "message": "can not find zipcode"
+}
 ```
-GET https://cepweather-763272253855.us-central1.run.app/weather/99999999
-Resposta esperada: 404 Not Found
+
+#### 4. Consultar Temperatura - CEP Inválido
+- **Method:** `GET`
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/123456789`
+- **Headers:** Nenhum necessário
+- **Resposta esperada:** `422 Unprocessable Entity`
+```json
+{
+  "message": "invalid zipcode"
+}
 ```
+
+### Casos de Teste Recomendados
+
+| Caso de Teste | URL | Status Esperado | Descrição |
+|---------------|-----|-----------------|-----------|
+| ✅ CEP válido | `/weather/01001000` | 200 | Retorna temperaturas |
+| ❌ CEP não encontrado | `/weather/99999999` | 404 | CEP não existe |
+| ❌ CEP não encontrado | `/weather/53424543` | 404 | CEP inexistente |
+| ❌ Formato inválido | `/weather/123` | 422 | Menos de 8 dígitos |
+| ❌ Formato inválido | `/weather/012345678` | 422 | Mais de 8 dígitos |
+| ❌ Rota vazia | `/weather/` | 404 | Sem CEP |
+| ✅ Health check | `/healthz` | 200 | Servidor funcionando |
+
+## 🐛 Tratamento de Erros
+
+A API trata corretamente os seguintes cenários de erro:
+
+### 1. CEP com formato inválido (422)
+- CEP com menos ou mais de 8 dígitos
+- CEP com letras ou caracteres especiais
+- Retorna: `{"message":"invalid zipcode"}`
+
+### 2. CEP não encontrado (404)
+- CEP com formato válido mas não existe na base do ViaCEP
+- Retorna: `{"message":"can not find zipcode"}`
+
+### 3. Erros de APIs externas (500)
+- Timeout na comunicação com ViaCEP ou WeatherAPI
+- Erro de parsing de resposta
+- Retorna: `{"message":"internal server error"}`
+
+### 4. Rotas não encontradas (404)
+- Acesso a endpoints inexistentes
+- Retorna resposta padrão do servidor
+
+## 🔧 Melhorias Implementadas
+
+### Correção de Bug - ViaCEP Response
+O ViaCEP retorna o campo `"erro"` como string `"true"` em vez de boolean quando um CEP não é encontrado. A aplicação foi corrigida para tratar ambos os casos:
+
+```go
+// Trata tanto "erro": true quanto "erro": "true"
+hasError := false
+if payload.Erro != nil {
+    switch v := payload.Erro.(type) {
+    case bool:
+        hasError = v
+    case string:
+        hasError = v == "true"
+    }
+}
+```
+
+Isso evita erros 500 quando CEPs inválidos são consultados e retorna corretamente 404 com a mensagem apropriada.
