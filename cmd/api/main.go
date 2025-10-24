@@ -40,8 +40,14 @@ func main() {
 
 	service := weather.NewService(locationClient, weatherClient)
 
+	port := getenv("PORT", defaultAddr)
+	// Cloud Run passa PORT sem ":", então adicionamos se necessário
+	if port != "" && port[0] != ':' {
+		port = ":" + port
+	}
+
 	server := &http.Server{
-		Addr:    getenv("PORT", defaultAddr),
+		Addr:    port,
 		Handler: api.NewRouter(service, logger),
 	}
 
