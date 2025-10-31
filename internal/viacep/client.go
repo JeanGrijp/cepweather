@@ -8,6 +8,9 @@ import (
 	"strings"
 
 	"github.com/JeanGrijp/cepweather/internal/weather"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Client implements weather.LocationProvider using the ViaCEP API.
@@ -26,19 +29,28 @@ func NewClient(httpClient *http.Client, baseURL string) *Client {
 
 // Lookup resolves a CEP to a Location using ViaCEP.
 func (c *Client) Lookup(ctx context.Context, cep string) (weather.Location, error) {
+	tracer := otel.Tracer("viacep-client")
+	ctx, span := tracer.Start(ctx, "viacep.Lookup",
+		trace.WithAttributes(attribute.String("cep", cep)))
+	defer span.End()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.lookupURL(cep), http.NoBody)
 	if err != nil {
+		span.RecordError(err)
 		return weather.Location{}, err
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
 		return weather.Location{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return weather.Location{}, fmt.Errorf("viacep: unexpected status %d", resp.StatusCode)
+		err := fmt.Errorf("viacep: unexpected status %d", resp.StatusCode)
+		span.RecordError(err)
+		return weather.Location{}, err
 	}
 
 	var payload struct {
@@ -48,6 +60,7 @@ func (c *Client) Lookup(ctx context.Context, cep string) (weather.Location, erro
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		span.RecordError(err)
 		return weather.Location{}, err
 	}
 
@@ -63,13 +76,21 @@ func (c *Client) Lookup(ctx context.Context, cep string) (weather.Location, erro
 	}
 
 	if hasError || payload.Localidade == "" {
+		span.RecordError(weather.ErrNotFound)
 		return weather.Location{}, weather.ErrNotFound
 	}
 
-	return weather.Location{
+	location := weather.Location{
 		City:  payload.Localidade,
 		State: payload.UF,
-	}, nil
+	}
+
+	span.SetAttributes(
+		attribute.String("city", location.City),
+		attribute.String("state", location.State),
+	)
+
+	return location, nil
 }
 
 func (c *Client) lookupURL(cep string) string {

@@ -16,6 +16,7 @@ type Location struct {
 
 // Temperatures holds the temperatures in three units of measurement.
 type Temperatures struct {
+	City       string  `json:"city"`
 	Celsius    float64 `json:"temp_C"`
 	Fahrenheit float64 `json:"temp_F"`
 	Kelvin     float64 `json:"temp_K"`

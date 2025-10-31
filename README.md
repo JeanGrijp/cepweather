@@ -1,6 +1,40 @@
 # CEP Weather
 
-Serviço em Go que consulta o endereço de um CEP brasileiro usando ViaCEP e retorna a temperatura atual (Celsius, Fahrenheit e Kelvin) para a cidade correspondente utilizando a WeatherAPI. Está preparado para rodar localmente, via Docker e para ser implantado no Google Cloud Run.
+Sistema distribuído em Go que recebe um CEP, identifica a cidade e retorna o clima atual (temperatura em Celsius, Fahrenheit e Kelvin) juntamente com a cidade. Implementa **OpenTelemetry (OTEL)** e **Zipkin** para tracing distribuído.
+
+## 🏗️ Arquitetura
+
+O sistema é composto por dois serviços que se comunicam via HTTP:
+
+```
+┌─────────────┐      POST      ┌─────────────┐     GET     ┌──────────┐
+│  Serviço A  │  ─────────────> │  Serviço B  │ ──────────> │  ViaCEP  │
+│   (Input)   │  {"cep":"..."}  │  (Weather)  │             └──────────┘
+└─────────────┘                 └─────────────┘
+      │                               │                      ┌────────────┐
+      │                               └─────────────────────>│ WeatherAPI │
+      │                                                      └────────────┘
+      │                          ┌─────────┐
+      └─────────────────────────>│ Zipkin  │<───────────────┘
+                 OTEL Traces      └─────────┘    OTEL Traces
+```
+
+### Serviço A - Input Service (Porta 8081)
+- Recebe requisições POST com `{"cep": "12345678"}`
+- Valida se o CEP tem 8 dígitos e é uma string
+- Encaminha para o Serviço B via HTTP
+- Retorna 422 se o CEP for inválido
+
+### Serviço B - Weather Service (Porta 8080)
+- Recebe CEP do Serviço A (ou diretamente via GET)
+- Consulta o ViaCEP para obter a localização
+- Consulta a WeatherAPI para obter a temperatura
+- Retorna: `{"city": "São Paulo", "temp_C": 28.5, "temp_F": 83.3, "temp_K": 301.5}`
+
+### Zipkin - Distributed Tracing (Porta 9411)
+- Coleta e visualiza traces distribuídos
+- Interface web em `http://localhost:9411`
+- Permite rastrear requisições end-to-end
 
 ## 🌐 API em Produção
 
@@ -91,46 +125,124 @@ ok
 | `WEATHER_API_KEY`       | Sim         | —                                    | Chave da WeatherAPI.                      |
 | `VIACEP_BASE_URL`       | Não         | `https://viacep.com.br/ws`           | Endpoint do serviço ViaCEP.               |
 | `WEATHER_API_BASE_URL`  | Não         | `https://api.weatherapi.com/v1`      | Endpoint da WeatherAPI.                   |
-| `PORT`                  | Não         | `8080`                               | Porta exposta pelo servidor HTTP.         |
+| `SERVICE_B_URL`         | Não         | `http://localhost:8080`              | URL do Serviço B (usado pelo Serviço A). |
+| `ZIPKIN_URL`            | Não         | `http://zipkin:9411/api/v2/spans`    | URL do exportador Zipkin.                |
+| `PORT`                  | Não         | `8080` (B) / `8081` (A)              | Porta exposta pelos servidores HTTP.      |
 
-## Execução local
+## 🚀 Execução local
 
-### Usando arquivo .env
+### Opção 1: Sistema Completo com Docker Compose (Recomendado)
+
+Esta é a forma mais simples de rodar todo o sistema com tracing distribuído:
 
 1. Crie um arquivo `.env` na raiz do projeto:
 ```bash
 WEATHER_API_KEY=sua_chave_aqui
 ```
 
-2. Execute com Make:
+2. Execute o sistema completo:
 ```bash
 make docker-watch
 ```
 
-### Usando variáveis de ambiente diretamente
+Isso irá iniciar:
+- **Serviço A (Input)** em `http://localhost:8081`
+- **Serviço B (Weather)** em `http://localhost:8080`
+- **Zipkin UI** em `http://localhost:9411`
 
+3. Teste o sistema completo (via Serviço A):
 ```bash
-export WEATHER_API_KEY=coloque_sua_chave_aqui
-PORT=8080 go run ./cmd/api
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "01001000"}'
 ```
 
-### Testando localmente
-
-Com o servidor no ar:
-
-```bash
-curl http://localhost:8080/weather/01001000
-```
-
-Resposta de exemplo:
-
+Resposta esperada:
 ```json
 {
+  "city": "São Paulo",
   "temp_C": 28.5,
   "temp_F": 83.3,
   "temp_K": 301.5
 }
 ```
+
+4. Visualize os traces no Zipkin:
+   - Abra `http://localhost:9411` no navegador
+   - Clique em "Run Query" para ver os traces
+   - Explore o trace distribuído Service-A → Service-B → ViaCEP/WeatherAPI
+
+### Opção 2: Executar serviços individuais (sem Docker)
+
+#### Serviço B (Weather API):
+```bash
+export WEATHER_API_KEY=sua_chave_aqui
+make run
+```
+
+#### Serviço A (Input Service):
+```bash
+make run-input-service
+```
+
+Teste direto no Serviço B:
+```bash
+curl http://localhost:8080/weather/01001000
+```
+
+Teste via Serviço A:
+```bash
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "01001000"}'
+```
+
+## 🔍 Observabilidade e Tracing Distribuído
+
+O sistema implementa **OpenTelemetry (OTEL)** para instrumentação e **Zipkin** para visualização de traces distribuídos.
+
+### O que é rastreado?
+
+O sistema cria spans para medir o tempo de:
+
+1. **Serviço A → Serviço B**: Propagação de contexto via HTTP headers
+2. **Busca de CEP no ViaCEP**: Span `viacep.Lookup`
+3. **Busca de temperatura na WeatherAPI**: Span `weatherapi.CurrentTemperatureC`
+
+### Como visualizar os traces no Zipkin?
+
+1. Acesse a interface do Zipkin: `http://localhost:9411`
+
+2. Faça uma requisição para gerar traces:
+```bash
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "01001000"}'
+```
+
+3. No Zipkin UI:
+   - Clique em **"Run Query"** para buscar traces
+   - Selecione um trace para ver detalhes
+   - Visualize a linha do tempo completa: Service-A → Service-B → APIs externas
+   - Veja os atributos de cada span (CEP, cidade, temperatura, etc.)
+
+### Exemplo de Trace
+
+```
+service-a: handle-cep (150ms)
+  └─> service-b: GET /weather/01001000 (140ms)
+      ├─> viacep.Lookup (50ms)
+      │   └─ Attributes: cep=01001000, city=São Paulo, state=SP
+      └─> weatherapi.CurrentTemperatureC (85ms)
+          └─ Attributes: city=São Paulo, state=SP, temp_c=28.5
+```
+
+### Atributos Capturados nos Spans
+
+| Span | Atributos |
+|------|-----------|
+| `viacep.Lookup` | `cep`, `city`, `state` |
+| `weatherapi.CurrentTemperatureC` | `city`, `state`, `temp_c` |
 
 ## Testes
 
@@ -292,18 +404,117 @@ curl https://SEU_ENDPOINT/weather/01001000
 
 | Comando | Descrição |
 |---------|-----------|
-| `make run` | Executa a aplicação localmente com Go |
+| `make run` | Executa o Serviço B (Weather API) localmente |
+| `make run-input-service` | Executa o Serviço A (Input Service) localmente |
 | `make test` | Executa os testes unitários |
-| `make build` | Compila o binário da aplicação |
-| `make docker-build` | Cria a imagem Docker |
-| `make docker-run` | Executa o container Docker |
-| `make docker-watch` | Build, sobe container e mostra logs (usa .env) |
+| `make build` | Compila os binários de ambos os serviços |
+| `make docker-build` | Cria as imagens Docker de ambos os serviços |
+| `make docker-run` | Executa o container do Serviço B |
+| `make docker-watch` | **Sistema completo** com Docker Compose + Zipkin |
 | `make compose` | Executa com Docker Compose |
 | `make clean` | Remove arquivos compilados e cache |
 
-## 📝 Testando com Postman
+## 📝 Testando com Postman ou cURL
 
-### Collection de Testes
+### Testando o Sistema Completo (Serviço A)
+
+O Serviço A é o ponto de entrada principal e valida o CEP antes de encaminhar para o Serviço B.
+
+#### 1. Enviar CEP via POST (Método correto)
+```bash
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "01001000"}'
+```
+
+**Resposta esperada (200 OK):**
+```json
+{
+  "city": "São Paulo",
+  "temp_C": 28.5,
+  "temp_F": 83.3,
+  "temp_K": 301.5
+}
+```
+
+#### 2. Teste com CEP inválido (formato incorreto)
+```bash
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "123"}'
+```
+
+**Resposta esperada (422 Unprocessable Entity):**
+```json
+{
+  "message": "invalid zipcode"
+}
+```
+
+#### 3. Teste com CEP não encontrado
+```bash
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "99999999"}'
+```
+
+**Resposta esperada (404 Not Found):**
+```json
+{
+  "message": "can not find zipcode"
+}
+```
+
+### Testando Diretamente no Serviço B (Bypass do Serviço A)
+
+Você também pode testar o Serviço B diretamente via GET:
+
+```bash
+curl http://localhost:8080/weather/01001000
+```
+
+### Collection Postman
+
+**Collection para importar no Postman:**
+
+#### 1. Serviço A - POST CEP Válido
+- **Method:** `POST`
+- **URL:** `http://localhost:8081`
+- **Headers:** `Content-Type: application/json`
+- **Body (raw JSON):**
+```json
+{
+  "cep": "01001000"
+}
+```
+
+#### 2. Serviço A - POST CEP Inválido
+- **Method:** `POST`
+- **URL:** `http://localhost:8081`
+- **Headers:** `Content-Type: application/json`
+- **Body (raw JSON):**
+```json
+{
+  "cep": "123"
+}
+```
+
+#### 3. Serviço B - GET Direto
+- **Method:** `GET`
+- **URL:** `http://localhost:8080/weather/54735220`
+- **Headers:** Nenhum necessário
+
+#### 4. Health Check - Serviço A
+- **Method:** `GET`
+- **URL:** `http://localhost:8081/healthz`
+- **Headers:** Nenhum necessário
+
+#### 5. Health Check - Serviço B
+- **Method:** `GET`
+- **URL:** `http://localhost:8080/healthz`
+- **Headers:** Nenhum necessário
+
+### Testando com Postman - API Produção (Serviço B apenas)
 
 Você pode testar a API usando o Postman com as seguintes requisições:
 

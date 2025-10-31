@@ -50,7 +50,7 @@ func (s *Service) GetByCEP(ctx context.Context, cep string) (Temperatures, error
 		return Temperatures{}, err
 	}
 
-	return newTemperatures(celsius), nil
+	return newTemperatures(location.City, celsius), nil
 }
 
 func normalizeCEP(cep string) (string, error) {
@@ -61,11 +61,12 @@ func normalizeCEP(cep string) (string, error) {
 	return trimmed, nil
 }
 
-func newTemperatures(celsius float64) Temperatures {
+func newTemperatures(city string, celsius float64) Temperatures {
 	fahrenheit := celsius*1.8 + 32
 	kelvin := celsius + 273
 
 	return Temperatures{
+		City:       city,
 		Celsius:    roundToSingleDecimal(celsius),
 		Fahrenheit: roundToSingleDecimal(fahrenheit),
 		Kelvin:     roundToSingleDecimal(kelvin),

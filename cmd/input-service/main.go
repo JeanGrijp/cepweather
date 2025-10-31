@@ -9,28 +9,23 @@ import (
 	"syscall"
 	"time"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-
-	"github.com/JeanGrijp/cepweather/internal/api"
+	"github.com/JeanGrijp/cepweather/internal/input"
 	"github.com/JeanGrijp/cepweather/internal/telemetry"
-	"github.com/JeanGrijp/cepweather/internal/viacep"
-	"github.com/JeanGrijp/cepweather/internal/weather"
-	"github.com/JeanGrijp/cepweather/internal/weatherapi"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
-	defaultAddr          = ":8080"
-	defaultViaCEPBaseURL = "https://viacep.com.br/ws"
-	defaultWeatherAPIURL = "https://api.weatherapi.com/v1"
-	defaultZipkinURL     = "http://zipkin:9411/api/v2/spans"
+	defaultAddr        = ":8081"
+	defaultServiceBURL = "http://localhost:8080"
+	defaultZipkinURL   = "http://zipkin:9411/api/v2/spans"
 )
 
 func main() {
-	logger := log.New(os.Stdout, "[SERVICE-B] ", log.LstdFlags|log.LUTC)
+	logger := log.New(os.Stdout, "[SERVICE-A] ", log.LstdFlags|log.LUTC)
 
 	// Initialize OpenTelemetry
 	zipkinURL := getenv("ZIPKIN_URL", defaultZipkinURL)
-	shutdown, err := telemetry.InitTracer("service-b", zipkinURL)
+	shutdown, err := telemetry.InitTracer("service-a", zipkinURL)
 	if err != nil {
 		logger.Printf("failed to initialize tracer: %v", err)
 	} else {
@@ -43,35 +38,34 @@ func main() {
 	}
 
 	httpClient := &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: otelhttp.NewTransport(http.DefaultTransport),
 	}
 
-	viaCEPBaseURL := getenv("VIACEP_BASE_URL", defaultViaCEPBaseURL)
-	weatherAPIBaseURL := getenv("WEATHER_API_BASE_URL", defaultWeatherAPIURL)
-	weatherAPIKey := os.Getenv("WEATHER_API_KEY")
-	if weatherAPIKey == "" {
-		logger.Fatal("WEATHER_API_KEY environment variable is required")
-	}
+	serviceBURL := getenv("SERVICE_B_URL", defaultServiceBURL)
+	handler := input.NewHandler(serviceBURL, httpClient, logger)
 
-	locationClient := viacep.NewClient(httpClient, viaCEPBaseURL)
-	weatherClient := weatherapi.NewClient(httpClient, weatherAPIBaseURL, weatherAPIKey)
-
-	service := weather.NewService(locationClient, weatherClient)
+	mux := http.NewServeMux()
+	mux.Handle("/", otelhttp.NewHandler(http.HandlerFunc(handler.HandleCEP), "handle-cep"))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("ok")); err != nil {
+			logger.Printf("failed to write healthz response: %v", err)
+		}
+	})
 
 	port := getenv("PORT", defaultAddr)
-	// Cloud Run passa PORT sem ":", então adicionamos se necessário
 	if port != "" && port[0] != ':' {
 		port = ":" + port
 	}
 
 	server := &http.Server{
 		Addr:    port,
-		Handler: api.NewRouter(service, logger),
+		Handler: mux,
 	}
 
 	go func() {
-		logger.Printf("starting server on %s", server.Addr)
+		logger.Printf("starting input service on %s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("server error: %v", err)
 		}

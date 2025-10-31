@@ -1,9 +1,45 @@
 services:
-  api:
-    build: .
+  # Serviço A - Input Service
+  input-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.input
+    ports:
+      - "8081:8081"
+    environment:
+      SERVICE_B_URL: http://service-b:8080
+      ZIPKIN_URL: http://zipkin:9411/api/v2/spans
+    depends_on:
+      - service-b
+      - zipkin
+    networks:
+      - cepweather-network
+
+  # Serviço B - Weather API Service
+  service-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     environment:
       WEATHER_API_KEY: ${WEATHER_API_KEY}
       VIACEP_BASE_URL: ${VIACEP_BASE_URL:-https://viacep.com.br/ws}
       WEATHER_API_BASE_URL: ${WEATHER_API_BASE_URL:-https://api.weatherapi.com/v1}
+      ZIPKIN_URL: http://zipkin:9411/api/v2/spans
+    depends_on:
+      - zipkin
+    networks:
+      - cepweather-network
+
+  # Zipkin - Distributed Tracing
+  zipkin:
+    image: openzipkin/zipkin:latest
+    ports:
+      - "9411:9411"
+    networks:
+      - cepweather-network
+
+networks:
+  cepweather-network:
+    driver: bridge

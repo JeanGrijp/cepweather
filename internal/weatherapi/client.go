@@ -8,6 +8,9 @@ import (
 	"strings"
 
 	"github.com/JeanGrijp/cepweather/internal/weather"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Client implements weather.TemperatureProvider using WeatherAPI.
@@ -28,9 +31,18 @@ func NewClient(httpClient *http.Client, baseURL, apiKey string) *Client {
 
 // CurrentTemperatureC fetches the current Celsius temperature for the given location.
 func (c *Client) CurrentTemperatureC(ctx context.Context, location weather.Location) (float64, error) {
+	tracer := otel.Tracer("weatherapi-client")
+	ctx, span := tracer.Start(ctx, "weatherapi.CurrentTemperatureC",
+		trace.WithAttributes(
+			attribute.String("city", location.City),
+			attribute.String("state", location.State),
+		))
+	defer span.End()
+
 	endpoint := fmt.Sprintf("%s/current.json", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
+		span.RecordError(err)
 		return 0, err
 	}
 
@@ -41,12 +53,15 @@ func (c *Client) CurrentTemperatureC(ctx context.Context, location weather.Locat
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
 		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, c.handleErrorResponse(resp)
+		err := c.handleErrorResponse(resp)
+		span.RecordError(err)
+		return 0, err
 	}
 
 	var payload struct {
@@ -56,8 +71,11 @@ func (c *Client) CurrentTemperatureC(ctx context.Context, location weather.Locat
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		span.RecordError(err)
 		return 0, err
 	}
+
+	span.SetAttributes(attribute.Float64("temp_c", payload.Current.TempC))
 
 	return payload.Current.TempC, nil
 }
