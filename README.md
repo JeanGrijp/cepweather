@@ -1,50 +1,134 @@
 # CEP Weather
 
-Sistema distribuído em Go que recebe um CEP, identifica a cidade e retorna o clima atual (temperatura em Celsius, Fahrenheit e Kelvin) juntamente com a cidade. Implementa **OpenTelemetry (OTEL)** e **Zipkin** para tracing distribuído.
+Sistema de microserviços em Go que recebe um CEP, identifica a cidade e retorna o clima atual (temperatura em Celsius, Fahrenheit e Kelvin). Implementa **OpenTelemetry (OTEL)** e **Zipkin** para observabilidade e tracing distribuído.
 
-## 🏗️ Arquitetura
+## 🏗️ Arquitetura de Microserviços
 
-O sistema é composto por dois serviços que se comunicam via HTTP:
+O sistema é composto por **dois serviços independentes** que se comunicam via HTTP, com instrumentação completa de tracing distribuído:
 
 ```
-┌─────────────┐      POST      ┌─────────────┐     GET     ┌──────────┐
-│  Serviço A  │  ─────────────> │  Serviço B  │ ──────────> │  ViaCEP  │
-│   (Input)   │  {"cep":"..."}  │  (Weather)  │             └──────────┘
-└─────────────┘                 └─────────────┘
-      │                               │                      ┌────────────┐
-      │                               └─────────────────────>│ WeatherAPI │
-      │                                                      └────────────┘
-      │                          ┌─────────┐
-      └─────────────────────────>│ Zipkin  │<───────────────┘
-                 OTEL Traces      └─────────┘    OTEL Traces
+┌──────────────────┐                                                          
+│     Cliente      │                                                          
+│  (Postman/cURL)  │                                                          
+└────────┬─────────┘                                                          
+         │ POST /cep                                                          
+         │ {"cep": "01001000"}                                                
+         ▼                                                                    
+┌─────────────────────────────────────────────────────────────────┐          
+│  Serviço A - Input Service (Porta 8081)                         │          
+│  ┌────────────────────────────────────────────────────────────┐ │          
+│  │ • Valida formato do CEP (8 dígitos numéricos)              │ │          
+│  │ • Retorna 422 se inválido                                  │ │          
+│  │ • Encaminha para Serviço B via HTTP GET                    │ │          
+│  │ • Propaga contexto OTEL via headers                        │ │          
+│  └────────────────────────────────────────────────────────────┘ │          
+└────────┬────────────────────────────────────────────────────────┘          
+         │ GET /weather/01001000                                              
+         │ (com traceparent header)                                           
+         ▼                                                                    
+┌─────────────────────────────────────────────────────────────────┐          
+│  Serviço B - Weather Service (Porta 8080)                       │          
+│  ┌────────────────────────────────────────────────────────────┐ │          
+│  │ 1. Busca localização no ViaCEP                             │ │          
+│  │    └─> Span: "viacep.Lookup" (mede latência)              │ │          
+│  │                                                            │ │          
+│  │ 2. Busca temperatura na WeatherAPI                        │ │          
+│  │    └─> Span: "weatherapi.CurrentTemperatureC"            │ │          
+│  │                                                            │ │          
+│  │ 3. Converte temperaturas (C → F → K)                     │ │          
+│  │                                                            │ │          
+│  │ 4. Retorna JSON com cidade + temperaturas                 │ │          
+│  └────────────────────────────────────────────────────────────┘ │          
+└────────┬────────────────────────────────────────────────────────┘          
+         │                                                                    
+         ▼                                                                    
+┌─────────────────────────────────────────────────────────────────┐          
+│  Resposta Final                                                 │          
+│  {                                                              │          
+│    "city": "São Paulo",                                         │          
+│    "temp_C": 28.5,                                              │          
+│    "temp_F": 83.3,                                              │          
+│    "temp_K": 301.5                                              │          
+│  }                                                              │          
+└─────────────────────────────────────────────────────────────────┘          
+                                                                              
+         │                                                                    
+         └──────────────────────┐                                            
+                                ▼                                            
+                       ┌─────────────────┐                                   
+                       │  Zipkin Server  │                                   
+                       │  (Porta 9411)   │                                   
+                       │                 │                                   
+                       │  • UI Web       │                                   
+                       │  • Query API    │                                   
+                       │  • Visualização │                                   
+                       └─────────────────┘                                   
+                                                                              
+    Serviço A e B enviam spans OTEL via HTTP para Zipkin                     
 ```
 
-### Serviço A - Input Service (Porta 8081)
-- Recebe requisições POST com `{"cep": "12345678"}`
-- Valida se o CEP tem 8 dígitos e é uma string
-- Encaminha para o Serviço B via HTTP
-- Retorna 422 se o CEP for inválido
+### 📊 Componentes do Sistema
 
-### Serviço B - Weather Service (Porta 8080)
-- Recebe CEP do Serviço A (ou diretamente via GET)
-- Consulta o ViaCEP para obter a localização
-- Consulta a WeatherAPI para obter a temperatura
-- Retorna: `{"city": "São Paulo", "temp_C": 28.5, "temp_F": 83.3, "temp_K": 301.5}`
+#### 🔵 Serviço A - Input Service (Porta 8081)
+- **Responsabilidade**: Validação de entrada e orquestração
+- **Endpoint**: `POST /`
+- **Validações**:
+  - CEP deve ser string de exatamente 8 dígitos numéricos
+  - Retorna `422` se formato inválido
+- **Comportamento**:
+  - Encaminha requisição válida para Serviço B via `GET /weather/{cep}`
+  - Propaga contexto de tracing via header `traceparent` (W3C Trace Context)
+  - Retorna resposta do Serviço B ao cliente
+- **Observabilidade**: Cria span raiz para rastreamento end-to-end
 
-### Zipkin - Distributed Tracing (Porta 9411)
-- Coleta e visualiza traces distribuídos
-- Interface web em `http://localhost:9411`
-- Permite rastrear requisições end-to-end
+#### 🟢 Serviço B - Weather Service (Porta 8080)
+- **Responsabilidade**: Orquestração de APIs externas e lógica de negócio
+- **Endpoint**: `GET /weather/{cep}`
+- **Integrações**:
+  1. **ViaCEP API**: Busca localização (cidade/estado) pelo CEP
+  2. **WeatherAPI**: Busca temperatura atual da cidade
+- **Processamento**:
+  - Valida formato do CEP (8 dígitos)
+  - Retorna `404` se CEP não encontrado no ViaCEP
+  - Converte temperatura: Celsius → Fahrenheit → Kelvin
+  - Combina dados de localização + clima em uma resposta unificada
+- **Observabilidade**: 
+  - Span `viacep.Lookup` com atributos: cep, city, state
+  - Span `weatherapi.CurrentTemperatureC` com atributos: city, state, temp_c
 
-## 🌐 API em Produção
+#### 🟡 Zipkin - Distributed Tracing (Porta 9411)
+- **Responsabilidade**: Coleta, armazenamento e visualização de traces
+- **Interface Web**: `http://localhost:9411`
+- **Funcionalidades**:
+  - Visualização de traces end-to-end
+  - Análise de latência por serviço/operação
+  - Detecção de gargalos e erros
+  - Query API para busca de traces
 
-A API está disponível publicamente no Google Cloud Run:
+## 🌐 Ambientes de Execução
+
+### 🐳 Ambiente Local (Sistema Completo)
+
+Execute todo o sistema localmente com Docker Compose:
+
+```bash
+make docker-watch
+```
+
+**Serviços disponíveis:**
+- **Serviço A (Input)**: `http://localhost:8081` - Ponto de entrada principal
+- **Serviço B (Weather)**: `http://localhost:8080` - API de clima (pode ser acessado diretamente)
+- **Zipkin UI**: `http://localhost:9411` - Interface de tracing distribuído
+
+### ☁️ API em Produção (Cloud Run)
+
+> **Nota**: Atualmente apenas o **Serviço B** está em produção. O Serviço A roda apenas localmente.
 
 **Base URL:** `https://cepweather-763272253855.us-central1.run.app`
 
-### Endpoints Disponíveis
+#### Endpoints Disponíveis (Serviço B)
 
-#### 1. Consultar Temperatura por CEP
+##### 1. Consultar Temperatura por CEP
 ```http
 GET /weather/{cep}
 ```
@@ -57,6 +141,7 @@ curl https://cepweather-763272253855.us-central1.run.app/weather/54735220
 **Resposta de sucesso (200 OK):**
 ```json
 {
+  "city": "São Lourenço da Mata",
   "temp_C": 28.5,
   "temp_F": 83.3,
   "temp_K": 301.5
@@ -199,50 +284,135 @@ curl -X POST http://localhost:8081 \
 
 ## 🔍 Observabilidade e Tracing Distribuído
 
-O sistema implementa **OpenTelemetry (OTEL)** para instrumentação e **Zipkin** para visualização de traces distribuídos.
+O sistema implementa **OpenTelemetry (OTEL)** para instrumentação automática e **Zipkin** para visualização de traces distribuídos, permitindo rastrear requisições através de múltiplos serviços.
 
-### O que é rastreado?
+### 🎯 Por que Tracing Distribuído?
 
-O sistema cria spans para medir o tempo de:
+Em arquiteturas de microserviços, uma única requisição do usuário pode atravessar múltiplos serviços. O tracing distribuído permite:
 
-1. **Serviço A → Serviço B**: Propagação de contexto via HTTP headers
-2. **Busca de CEP no ViaCEP**: Span `viacep.Lookup`
-3. **Busca de temperatura na WeatherAPI**: Span `weatherapi.CurrentTemperatureC`
+- 🔍 **Visibilidade end-to-end**: Ver o caminho completo de uma requisição
+- ⏱️ **Análise de latência**: Identificar quais serviços/operações são lentos
+- 🐛 **Debug facilitado**: Rastrear erros através de múltiplos serviços
+- 📊 **Métricas de performance**: Medir SLA e identificar gargalos
 
-### Como visualizar os traces no Zipkin?
+### 📡 O que é Instrumentado?
 
-1. Acesse a interface do Zipkin: `http://localhost:9411`
+#### Serviço A (Input Service)
+- **Span HTTP**: Toda requisição POST cria um span raiz
+- **Propagação de contexto**: Injeta `traceparent` header ao chamar Serviço B
 
-2. Faça uma requisição para gerar traces:
+#### Serviço B (Weather Service)
+- **Span HTTP**: Recebe contexto do Serviço A via header
+- **Span `viacep.Lookup`**: Mede tempo de consulta ao ViaCEP
+  - Atributos: `cep`, `city`, `state`
+- **Span `weatherapi.CurrentTemperatureC`**: Mede tempo de consulta à WeatherAPI
+  - Atributos: `city`, `state`, `temp_c`
+
+### 🖥️ Como Visualizar Traces no Zipkin
+
+1. **Inicie o sistema completo**:
 ```bash
+make docker-watch
+```
+
+2. **Gere traces fazendo requisições**:
+```bash
+# Requisição de sucesso
 curl -X POST http://localhost:8081 \
   -H "Content-Type: application/json" \
   -d '{"cep": "01001000"}'
+
+# CEP não encontrado
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "99999999"}'
+
+# CEP inválido
+curl -X POST http://localhost:8081 \
+  -H "Content-Type: application/json" \
+  -d '{"cep": "123"}'
 ```
 
-3. No Zipkin UI:
-   - Clique em **"Run Query"** para buscar traces
-   - Selecione um trace para ver detalhes
-   - Visualize a linha do tempo completa: Service-A → Service-B → APIs externas
-   - Veja os atributos de cada span (CEP, cidade, temperatura, etc.)
+3. **Acesse a UI do Zipkin**: `http://localhost:9411`
 
-### Exemplo de Trace
+4. **Explore os traces**:
+   - Clique em **"Run Query"** para buscar traces recentes
+   - Selecione um trace na lista para ver detalhes
+   - Visualize a **linha do tempo** (timeline) de cada span
+   - Clique em cada span para ver **atributos** e **tags**
+
+### 📊 Exemplo de Trace Completo
+
+Quando você faz uma requisição bem-sucedida, o Zipkin mostra:
 
 ```
-service-a: handle-cep (150ms)
-  └─> service-b: GET /weather/01001000 (140ms)
-      ├─> viacep.Lookup (50ms)
-      │   └─ Attributes: cep=01001000, city=São Paulo, state=SP
-      └─> weatherapi.CurrentTemperatureC (85ms)
-          └─ Attributes: city=São Paulo, state=SP, temp_c=28.5
+┌─────────────────────────────────────────────────────────────────────┐
+│ service-a: POST / (200ms total)                                     │
+│ ├─ http.method: POST                                                │
+│ ├─ http.url: /                                                      │
+│ └─ http.status_code: 200                                            │
+│                                                                     │
+│   └─> service-b: GET /weather/01001000 (190ms)                     │
+│       ├─ http.method: GET                                           │
+│       ├─ http.url: /weather/01001000                                │
+│       └─ http.status_code: 200                                      │
+│                                                                     │
+│         ├─> viacep.Lookup (45ms)                                    │
+│         │   ├─ cep: 01001000                                        │
+│         │   ├─ city: São Paulo                                      │
+│         │   └─ state: SP                                            │
+│         │                                                           │
+│         └─> weatherapi.CurrentTemperatureC (140ms)                  │
+│             ├─ city: São Paulo                                      │
+│             ├─ state: SP                                            │
+│             └─ temp_c: 28.5                                         │
+└─────────────────────────────────────────────────────────────────────┘
+
+Timeline:
+|----service-a (200ms)-------------------------------------------|
+  |----service-b (190ms)-------------------------------------|
+    |--viacep (45ms)--|
+                        |----weatherapi (140ms)----------|
 ```
 
-### Atributos Capturados nos Spans
+### 🏷️ Atributos Capturados nos Spans
 
-| Span | Atributos |
-|------|-----------|
-| `viacep.Lookup` | `cep`, `city`, `state` |
-| `weatherapi.CurrentTemperatureC` | `city`, `state`, `temp_c` |
+| Span | Atributos | Exemplo |
+|------|-----------|---------|
+| `POST /` | `http.method`, `http.url`, `http.status_code` | `POST`, `/`, `200` |
+| `GET /weather/{cep}` | `http.method`, `http.url`, `http.status_code` | `GET`, `/weather/01001000`, `200` |
+| `viacep.Lookup` | `cep`, `city`, `state` | `01001000`, `São Paulo`, `SP` |
+| `weatherapi.CurrentTemperatureC` | `city`, `state`, `temp_c` | `São Paulo`, `SP`, `28.5` |
+
+### 🔧 Propagação de Contexto (W3C Trace Context)
+
+O sistema usa o padrão **W3C Trace Context** para propagar o contexto de tracing entre serviços:
+
+```http
+# Serviço A envia para Serviço B:
+GET /weather/01001000 HTTP/1.1
+Host: service-b:8080
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+```
+
+**Formato do traceparent**:
+```
+00-<trace-id>-<parent-span-id>-<trace-flags>
+│  │          │                 │
+│  │          │                 └─ Flags (01 = sampled)
+│  │          └─ ID do span pai (16 bytes hex)
+│  └─ ID do trace (32 bytes hex)
+└─ Versão (sempre 00)
+```
+
+Isso garante que todos os spans sejam correlacionados ao mesmo trace, mesmo atravessando múltiplos serviços.
+
+### 🚀 Recursos Avançados do Zipkin
+
+- **Filtros de busca**: Busque traces por service name, span name, duration, etc.
+- **Dependências**: Visualize o grafo de dependências entre serviços
+- **Comparação de traces**: Compare traces lentos vs rápidos
+- **JSON export**: Exporte traces para análise offline
 
 ## Testes
 
@@ -414,13 +584,13 @@ curl https://SEU_ENDPOINT/weather/01001000
 | `make compose` | Executa com Docker Compose |
 | `make clean` | Remove arquivos compilados e cache |
 
-## 📝 Testando com Postman ou cURL
+## 📝 Testando o Sistema
 
-### Testando o Sistema Completo (Serviço A)
+### 🔵 Fluxo Completo: Serviço A → Serviço B (Recomendado)
 
-O Serviço A é o ponto de entrada principal e valida o CEP antes de encaminhar para o Serviço B.
+O Serviço A é o **ponto de entrada principal** do sistema e implementa a validação de CEP antes de encaminhar para o Serviço B.
 
-#### 1. Enviar CEP via POST (Método correto)
+#### ✅ 1. CEP Válido (Sucesso)
 ```bash
 curl -X POST http://localhost:8081 \
   -H "Content-Type: application/json" \
@@ -437,7 +607,15 @@ curl -X POST http://localhost:8081 \
 }
 ```
 
-#### 2. Teste com CEP inválido (formato incorreto)
+**O que acontece internamente:**
+1. Serviço A valida formato do CEP ✅
+2. Serviço A faz `GET http://service-b:8080/weather/01001000`
+3. Serviço B busca localização no ViaCEP
+4. Serviço B busca temperatura na WeatherAPI
+5. Serviço B retorna JSON com city + temperaturas
+6. Serviço A repassa resposta ao cliente
+
+#### ❌ 2. CEP com Formato Inválido (422)
 ```bash
 curl -X POST http://localhost:8081 \
   -H "Content-Type: application/json" \
@@ -451,7 +629,12 @@ curl -X POST http://localhost:8081 \
 }
 ```
 
-#### 3. Teste com CEP não encontrado
+**Por que 422?** 
+- CEP tem menos de 8 dígitos
+- Validação falha no **Serviço A**
+- Requisição não chega ao Serviço B
+
+#### ❌ 3. CEP Válido mas Não Encontrado (404)
 ```bash
 curl -X POST http://localhost:8081 \
   -H "Content-Type: application/json" \
@@ -465,111 +648,132 @@ curl -X POST http://localhost:8081 \
 }
 ```
 
-### Testando Diretamente no Serviço B (Bypass do Serviço A)
+**O que acontece:**
+1. Serviço A valida formato ✅ (8 dígitos)
+2. Serviço A encaminha para Serviço B
+3. Serviço B consulta ViaCEP
+4. ViaCEP retorna `{"erro": "true"}` (CEP não existe)
+5. Serviço B retorna 404
+6. Serviço A repassa o 404 ao cliente
 
-Você também pode testar o Serviço B diretamente via GET:
+### 🟢 Acesso Direto ao Serviço B (Bypass)
+
+Você também pode testar o Serviço B diretamente, sem passar pelo Serviço A:
 
 ```bash
+# Via GET direto no Serviço B
 curl http://localhost:8080/weather/01001000
 ```
 
-### Collection Postman
+**Diferença:**
+- ✅ **Via Serviço A (POST)**: Validação de CEP + Tracing distribuído completo
+- ⚠️ **Direto no Serviço B (GET)**: Sem validação prévia, apenas tracing do Serviço B
 
-**Collection para importar no Postman:**
+### 🧪 Collection Postman Completa
 
-#### 1. Serviço A - POST CEP Válido
+Importe essa collection no Postman para testar todos os cenários:
+
+#### 📋 Requests para Ambiente Local
+
+##### 1. [Serviço A] POST CEP Válido
 - **Method:** `POST`
 - **URL:** `http://localhost:8081`
-- **Headers:** `Content-Type: application/json`
+- **Headers:** 
+  ```
+  Content-Type: application/json
+  ```
 - **Body (raw JSON):**
-```json
-{
-  "cep": "01001000"
-}
-```
+  ```json
+  {
+    "cep": "01001000"
+  }
+  ```
+- **Resposta esperada:** `200 OK` com city + temperaturas
 
-#### 2. Serviço A - POST CEP Inválido
+##### 2. [Serviço A] POST CEP Inválido (Formato)
 - **Method:** `POST`
 - **URL:** `http://localhost:8081`
-- **Headers:** `Content-Type: application/json`
+- **Headers:** 
+  ```
+  Content-Type: application/json
+  ```
 - **Body (raw JSON):**
-```json
-{
-  "cep": "123"
-}
-```
+  ```json
+  {
+    "cep": "123"
+  }
+  ```
+- **Resposta esperada:** `422 Unprocessable Entity`
 
-#### 3. Serviço B - GET Direto
+##### 3. [Serviço A] POST CEP Não Encontrado
+- **Method:** `POST`
+- **URL:** `http://localhost:8081`
+- **Headers:** 
+  ```
+  Content-Type: application/json
+  ```
+- **Body (raw JSON):**
+  ```json
+  {
+    "cep": "99999999"
+  }
+  ```
+- **Resposta esperada:** `404 Not Found`
+
+##### 4. [Serviço B] GET Direto (Bypass do A)
 - **Method:** `GET`
 - **URL:** `http://localhost:8080/weather/54735220`
-- **Headers:** Nenhum necessário
+- **Headers:** Nenhum
+- **Resposta esperada:** `200 OK` com city + temperaturas
 
-#### 4. Health Check - Serviço A
+##### 5. [Serviço A] Health Check
 - **Method:** `GET`
 - **URL:** `http://localhost:8081/healthz`
-- **Headers:** Nenhum necessário
+- **Headers:** Nenhum
+- **Resposta esperada:** `200 OK` com body `ok`
 
-#### 5. Health Check - Serviço B
+##### 6. [Serviço B] Health Check
 - **Method:** `GET`
 - **URL:** `http://localhost:8080/healthz`
-- **Headers:** Nenhum necessário
+- **Headers:** Nenhum
+- **Resposta esperada:** `200 OK` com body `ok`
 
-### Testando com Postman - API Produção (Serviço B apenas)
+#### ☁️ Requests para Produção (Cloud Run - Apenas Serviço B)
 
-Você pode testar a API usando o Postman com as seguintes requisições:
+> **Nota**: O Serviço A não está em produção, apenas o Serviço B.
 
-#### 1. Health Check
-- **Method:** `GET`
-- **URL:** `https://cepweather-763272253855.us-central1.run.app/healthz`
-- **Headers:** Nenhum necessário
-- **Resposta esperada:** `200 OK` com corpo `ok`
-
-#### 2. Consultar Temperatura - CEP Válido
+##### 1. [Produção] GET CEP Válido
 - **Method:** `GET`
 - **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/54735220`
-- **Headers:** Nenhum necessário
+- **Headers:** Nenhum
 - **Resposta esperada:** `200 OK`
-```json
-{
-  "temp_C": 28.5,
-  "temp_F": 83.3,
-  "temp_K": 301.5
-}
-```
 
-#### 3. Consultar Temperatura - CEP Não Encontrado
+##### 2. [Produção] GET CEP Não Encontrado
 - **Method:** `GET`
-- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/53424543`
-- **Headers:** Nenhum necessário
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/99999999`
+- **Headers:** Nenhum
 - **Resposta esperada:** `404 Not Found`
-```json
-{
-  "message": "can not find zipcode"
-}
-```
 
-#### 4. Consultar Temperatura - CEP Inválido
+##### 3. [Produção] Health Check
 - **Method:** `GET`
-- **URL:** `https://cepweather-763272253855.us-central1.run.app/weather/123456789`
-- **Headers:** Nenhum necessário
-- **Resposta esperada:** `422 Unprocessable Entity`
-```json
-{
-  "message": "invalid zipcode"
-}
-```
+- **URL:** `https://cepweather-763272253855.us-central1.run.app/healthz`
+- **Headers:** Nenhum
+- **Resposta esperada:** `200 OK` com body `ok`
 
-### Casos de Teste Recomendados
+### 📊 Matriz de Testes Recomendada
 
-| Caso de Teste | URL | Status Esperado | Descrição |
-|---------------|-----|-----------------|-----------|
-| ✅ CEP válido | `/weather/01001000` | 200 | Retorna temperaturas |
-| ❌ CEP não encontrado | `/weather/99999999` | 404 | CEP não existe |
-| ❌ CEP não encontrado | `/weather/53424543` | 404 | CEP inexistente |
-| ❌ Formato inválido | `/weather/123` | 422 | Menos de 8 dígitos |
-| ❌ Formato inválido | `/weather/012345678` | 422 | Mais de 8 dígitos |
-| ❌ Rota vazia | `/weather/` | 404 | Sem CEP |
-| ✅ Health check | `/healthz` | 200 | Servidor funcionando |
+| # | Cenário | Endpoint | Body/Param | Status | Response |
+|---|---------|----------|------------|--------|----------|
+| 1 | ✅ CEP válido (São Paulo) | `POST http://localhost:8081` | `{"cep":"01001000"}` | 200 | City + Temps |
+| 2 | ✅ CEP válido (Rio) | `POST http://localhost:8081` | `{"cep":"20040020"}` | 200 | City + Temps |
+| 3 | ✅ CEP válido (Recife) | `POST http://localhost:8081` | `{"cep":"50010000"}` | 200 | City + Temps |
+| 4 | ❌ CEP curto (3 dígitos) | `POST http://localhost:8081` | `{"cep":"123"}` | 422 | Invalid zipcode |
+| 5 | ❌ CEP longo (9 dígitos) | `POST http://localhost:8081` | `{"cep":"012345678"}` | 422 | Invalid zipcode |
+| 6 | ❌ CEP não numérico | `POST http://localhost:8081` | `{"cep":"abcd1234"}` | 422 | Invalid zipcode |
+| 7 | ❌ CEP não encontrado | `POST http://localhost:8081` | `{"cep":"99999999"}` | 404 | Cannot find zipcode |
+| 8 | ✅ Direto no Serviço B | `GET http://localhost:8080/weather/01001000` | - | 200 | City + Temps |
+| 9 | ✅ Health Check A | `GET http://localhost:8081/healthz` | - | 200 | ok |
+| 10 | ✅ Health Check B | `GET http://localhost:8080/healthz` | - | 200 | ok |
 
 ## 🐛 Tratamento de Erros
 
